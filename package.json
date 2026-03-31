@@ -1,0 +1,48 @@
+{
+  "name": "jira-markup-preview",
+  "displayName": "Jira Markup Preview",
+  "description": "Live preview for Jira wiki markup in VS Code",
+  "version": "0.0.1",
+  "publisher": "lena",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": ["Other"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "jiraMarkupPreview.openPreview",
+        "title": "Jira Markup: Open Preview",
+        "category": "Jira Markup"
+      }
+    ],
+    "languages": [
+      {
+        "id": "jira-markup",
+        "aliases": ["Jira Markup", "Jira Wiki"],
+        "extensions": [".jira", ".wiki"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "jiraMarkupPreview.openPreview",
+          "when": "resourceExtname == .jira || resourceExtname == .wiki || resourceLangId == jira-markup || resourceLangId == plaintext",
+          "group": "navigation"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "npm run compile"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.10",
+    "@types/vscode": "^1.90.0",
+    "typescript": "^5.8.0"
+  }
+}
