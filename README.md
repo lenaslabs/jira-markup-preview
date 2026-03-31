@@ -45,6 +45,3 @@ To create a VSIX package:
 ```
 vsce package
 ```
-
-
-## License
