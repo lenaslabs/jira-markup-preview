@@ -2,7 +2,7 @@
   "name": "jira-markup-preview",
   "displayName": "Jira Markup Preview",
   "description": "Live preview for Jira wiki markup in VS Code",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "license": "0BSD",
   "publisher": "lenaslabs",
   "engines": {
