@@ -7,6 +7,32 @@ function escapeHtml(input: string): string {
     .replace(/'/g, "&#39;");
 }
 
+function createPlaceholder(prefix: string, index: number): string {
+  return `@@${prefix}${index}@@`;
+}
+
+function replaceAllLiteral(input: string, search: string, replacement: string): string {
+  return input.split(search).join(replacement);
+}
+
+function sanitizeColorValue(color: string): string | null {
+  const normalized = color.trim();
+
+  if (/^[a-zA-Z][a-zA-Z0-9-]*$/.test(normalized)) {
+    return normalized;
+  }
+
+  if (/^#[0-9a-fA-F]{3,8}$/.test(normalized)) {
+    return normalized;
+  }
+
+  if (/^(rgb|rgba|hsl|hsla)\([^()]+\)$/.test(normalized)) {
+    return normalized;
+  }
+
+  return null;
+}
+
 function sanitizeUrl(url: string): string | null {
   try {
     const parsed = new URL(url);
@@ -20,25 +46,79 @@ function sanitizeUrl(url: string): string | null {
 }
 
 function renderInline(text: string): string {
-  let html = escapeHtml(text);
+  let normalized = text;
+  const escapedTokens: string[] = [];
+  const htmlTokens: string[] = [];
 
-  html = html.replace(/\{\{([^{}]+)\}\}/g, (_match, code: string) => {
-    return `<code>${escapeHtml(code)}</code>`;
+  normalized = normalized.replace(/\\\\/g, () => {
+    const placeholder = createPlaceholder("HTML", htmlTokens.length);
+    htmlTokens.push("<br />");
+    return placeholder;
   });
 
-  html = html.replace(/\[([^|\]]+)\|([^\]]+)\]/g, (_match, label: string, href: string) => {
-    const safeHref = sanitizeUrl(href.trim());
-    const safeLabel = escapeHtml(label.trim());
+  normalized = normalized.replace(/\\([\\_*])/g, (_match, value: string) => {
+    const placeholder = createPlaceholder("ESC", escapedTokens.length);
+    escapedTokens.push(escapeHtml(value));
+    return placeholder;
+  });
 
-    if (!safeHref) {
-      return safeLabel;
+  normalized = normalized.replace(/\{\{([^{}]+)\}\}/g, (_match, code: string) => {
+    const placeholder = createPlaceholder("HTML", htmlTokens.length);
+    htmlTokens.push(`<code>${escapeHtml(code)}</code>`);
+    return placeholder;
+  });
+
+  normalized = normalized.replace(
+    /\[([^|\]]+)\|([^\]]+)\]/g,
+    (_match, label: string, href: string) => {
+      const placeholder = createPlaceholder("HTML", htmlTokens.length);
+      const safeHref = sanitizeUrl(href.trim());
+      const safeLabel = escapeHtml(label.trim());
+
+      if (!safeHref) {
+        htmlTokens.push(safeLabel);
+        return placeholder;
+      }
+
+      htmlTokens.push(
+        `<a href="${safeHref}" target="_blank" rel="noopener noreferrer">${safeLabel}</a>`
+      );
+      return placeholder;
     }
+  );
 
-    return `<a href="${safeHref}" target="_blank" rel="noopener noreferrer">${safeLabel}</a>`;
-  });
+  normalized = normalized.replace(
+    /\{color:([^}\n]+)\}([\s\S]*?)\{color\}/g,
+    (_match, color: string, content: string) => {
+      const placeholder = createPlaceholder("HTML", htmlTokens.length);
+      const safeColor = sanitizeColorValue(color);
 
+      if (!safeColor) {
+        htmlTokens.push(renderInline(content));
+        return placeholder;
+      }
+
+      htmlTokens.push(
+        `<span style="color: ${escapeHtml(safeColor)}">${renderInline(content)}</span>`
+      );
+      return placeholder;
+    }
+  );
+
+  let html = escapeHtml(normalized);
+
+  html = html.replace(/---/g, "&mdash;");
+  html = html.replace(/--/g, "&ndash;");
   html = html.replace(/\*([^*\n]+)\*/g, "<strong>$1</strong>");
   html = html.replace(/_([^_\n]+)_/g, "<em>$1</em>");
+
+  escapedTokens.forEach((token, index) => {
+    html = replaceAllLiteral(html, createPlaceholder("ESC", index), token);
+  });
+
+  htmlTokens.forEach((token, index) => {
+    html = replaceAllLiteral(html, createPlaceholder("HTML", index), token);
+  });
 
   return html;
 }
@@ -78,24 +158,82 @@ export function renderJiraMarkup(source: string): string {
   const lines = source.split(/\r?\n/);
   const out: string[] = [];
 
-  let inCodeBlock = false;
+  let codeBlockLines: string[] | undefined;
   let codeBlockLanguage = "";
   let codeBlockStartLine = 0;
-  let inUl = false;
-  let ulLine = 0;
-  let inOl = false;
-  let olLine = 0;
+  let colorBlockLines: string[] | undefined;
+  let colorBlockValue = "";
+  let colorBlockStartLine = 0;
   let tableRows: TableRow[] = [];
+  const listStack: Array<{
+    type: "ul" | "ol";
+    itemOpen: boolean;
+    orderedIndex: number;
+  }> = [];
+  let paragraphLines: string[] = [];
+  let paragraphStartLine = 0;
+
+  const flushParagraph = () => {
+    if (paragraphLines.length === 0) {
+      return;
+    }
+
+    out.push(
+      `<p data-line="${paragraphStartLine}">${renderInline(paragraphLines.join(" "))}</p>`
+    );
+    paragraphLines = [];
+  };
 
   const closeLists = () => {
-    if (inUl) {
-      out.push("</ul>");
-      inUl = false;
+    while (listStack.length > 0) {
+      const current = listStack.pop();
+      if (!current) {
+        continue;
+      }
+
+      if (current.itemOpen) {
+        out.push("</li>");
+      }
+      out.push(`</${current.type}>`);
     }
-    if (inOl) {
-      out.push("</ol>");
-      inOl = false;
+  };
+
+  const flushCodeBlock = () => {
+    if (!codeBlockLines) {
+      return;
     }
+
+    const classAttr = codeBlockLanguage ? ` class="language-${codeBlockLanguage}"` : "";
+    out.push(
+      `<pre data-line="${codeBlockStartLine}"><code${classAttr}>${escapeHtml(
+        codeBlockLines.join("\n")
+      )}</code></pre>`
+    );
+
+    codeBlockLines = undefined;
+    codeBlockLanguage = "";
+  };
+
+  const flushColorBlock = () => {
+    if (!colorBlockLines) {
+      return;
+    }
+
+    const safeColor = sanitizeColorValue(colorBlockValue);
+    const content = colorBlockLines.map((entry) => renderInline(entry)).join("<br />");
+
+    if (safeColor) {
+      out.push(
+        `<p data-line="${colorBlockStartLine}"><span style="color: ${escapeHtml(
+          safeColor
+        )}">${content}</span></p>`
+      );
+    } else {
+      out.push(`<p data-line="${colorBlockStartLine}">${content}</p>`);
+    }
+
+    colorBlockLines = undefined;
+    colorBlockValue = "";
   };
 
   const flushTable = () => {
@@ -138,33 +276,49 @@ export function renderJiraMarkup(source: string): string {
 
     const codeFence = trimmed.match(/^\{code(?::([^}]+))?\}$/);
     if (codeFence) {
+      flushParagraph();
       flushTable();
       closeLists();
 
-      if (!inCodeBlock) {
+      if (!codeBlockLines) {
         codeBlockStartLine = i;
         codeBlockLanguage = codeFence[1] ? escapeHtml(codeFence[1].trim()) : "";
-        const classAttr = codeBlockLanguage
-          ? ` class="language-${codeBlockLanguage}"`
-          : "";
-
-        out.push(`<pre data-line="${codeBlockStartLine}"><code${classAttr}>`);
-        inCodeBlock = true;
+        codeBlockLines = [];
       } else {
-        out.push("</code></pre>");
-        inCodeBlock = false;
-        codeBlockLanguage = "";
+        flushCodeBlock();
       }
       continue;
     }
 
-    if (inCodeBlock) {
-      out.push(escapeHtml(rawLine));
+    if (codeBlockLines) {
+      codeBlockLines.push(rawLine);
+      continue;
+    }
+
+    const colorBlockStart = trimmed.match(/^\{color:([^}]+)\}$/);
+    if (colorBlockStart) {
+      flushParagraph();
+      flushTable();
+      closeLists();
+      colorBlockStartLine = i;
+      colorBlockValue = colorBlockStart[1];
+      colorBlockLines = [];
+      continue;
+    }
+
+    if (trimmed === "{color}" && colorBlockLines) {
+      flushColorBlock();
+      continue;
+    }
+
+    if (colorBlockLines) {
+      colorBlockLines.push(rawLine.trimEnd());
       continue;
     }
 
     const tableRow = parseTableRow(trimmed, i);
     if (tableRow) {
+      flushParagraph();
       closeLists();
       tableRows.push(tableRow);
       continue;
@@ -172,13 +326,21 @@ export function renderJiraMarkup(source: string): string {
     flushTable();
 
     if (!trimmed) {
+      flushParagraph();
       closeLists();
-      out.push("");
+      continue;
+    }
+
+    if (trimmed === "-----") {
+      flushParagraph();
+      closeLists();
+      out.push(`<hr data-line="${i}" />`);
       continue;
     }
 
     const heading = trimmed.match(/^h([1-6])\.\s+(.*)$/);
     if (heading) {
+      flushParagraph();
       closeLists();
       out.push(
         `<h${heading[1]} data-line="${i}">${renderInline(heading[2])}</h${heading[1]}>`
@@ -188,51 +350,88 @@ export function renderJiraMarkup(source: string): string {
 
     const blockQuote = trimmed.match(/^bq\.\s+(.*)$/);
     if (blockQuote) {
+      flushParagraph();
       closeLists();
       out.push(`<blockquote data-line="${i}">${renderInline(blockQuote[1])}</blockquote>`);
       continue;
     }
 
-    const ulMatch = rawLine.match(/^\s*\*\s+(.*)$/);
-    if (ulMatch) {
-      if (inOl) {
-        out.push("</ol>");
-        inOl = false;
-      }
-      if (!inUl) {
-        ulLine = i;
-        out.push(`<ul data-line="${ulLine}">`);
-        inUl = true;
-      }
-      out.push(`<li>${renderInline(ulMatch[1].trim())}</li>`);
-      continue;
-    }
+    const listMatch = rawLine.match(/^\s*([*#]+)\s+(.*)$/);
+    if (listMatch) {
+      flushParagraph();
 
-    const olMatch = rawLine.match(/^\s*#\s+(.*)$/);
-    if (olMatch) {
-      if (inUl) {
-        out.push("</ul>");
-        inUl = false;
+      const markerTypes = [...listMatch[1]].map((marker) =>
+        marker === "*" ? "ul" : "ol"
+      );
+      const content = listMatch[2].trim();
+      let commonDepth = 0;
+
+      while (
+        commonDepth < listStack.length &&
+        commonDepth < markerTypes.length &&
+        listStack[commonDepth].type === markerTypes[commonDepth]
+      ) {
+        commonDepth++;
       }
-      if (!inOl) {
-        olLine = i;
-        out.push(`<ol data-line="${olLine}">`);
-        inOl = true;
+
+      while (listStack.length > commonDepth) {
+        const current = listStack.pop();
+        if (!current) {
+          continue;
+        }
+
+        if (current.itemOpen) {
+          out.push("</li>");
+        }
+        out.push(`</${current.type}>`);
       }
-      out.push(`<li>${renderInline(olMatch[1].trim())}</li>`);
+
+      if (markerTypes.length <= commonDepth && commonDepth > 0) {
+        const parent = listStack[commonDepth - 1];
+        if (parent.itemOpen) {
+          out.push("</li>");
+          parent.itemOpen = false;
+        }
+      }
+
+      for (let depth = commonDepth; depth < markerTypes.length; depth++) {
+        const type = markerTypes[depth];
+        out.push(`<${type} data-line="${i}">`);
+        listStack.push({ type, itemOpen: false, orderedIndex: 0 });
+      }
+
+      const currentList = listStack[listStack.length - 1];
+      let itemHtml = renderInline(content);
+
+      if (currentList.type === "ol") {
+        currentList.orderedIndex += 1;
+        const orderedPath = listStack
+          .filter((entry) => entry.type === "ol")
+          .map((entry) => entry.orderedIndex)
+          .join(".");
+
+        itemHtml =
+          `<span class="list-marker">${orderedPath}.</span>` +
+          `<span class="list-item-content">${itemHtml}</span>`;
+      }
+
+      out.push(`<li data-line="${i}">${itemHtml}`);
+      currentList.itemOpen = true;
       continue;
     }
 
     closeLists();
-    out.push(`<p data-line="${i}">${renderInline(trimmed)}</p>`);
+    if (paragraphLines.length === 0) {
+      paragraphStartLine = i;
+    }
+    paragraphLines.push(trimmed);
   }
 
+  flushParagraph();
   flushTable();
   closeLists();
-
-  if (inCodeBlock) {
-    out.push("</code></pre>");
-  }
+  flushCodeBlock();
+  flushColorBlock();
 
   return out.join("\n");
 }

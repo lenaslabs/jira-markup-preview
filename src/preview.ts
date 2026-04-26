@@ -5,16 +5,25 @@ export class JiraPreviewManager implements vscode.Disposable {
   private panel: vscode.WebviewPanel | undefined;
   private currentDocument: vscode.TextDocument | undefined;
   private renderTimer: ReturnType<typeof setTimeout> | undefined;
+  private wordWrapAdjustedDocuments = new Set<string>();
 
   constructor(private readonly context: vscode.ExtensionContext) {}
 
-  public showPreview(document: vscode.TextDocument) {
-    this.currentDocument = document;
+  public showPreview(editor: vscode.TextEditor) {
+    if (!isPreviewableDocument(editor.document)) {
+      vscode.window.showInformationMessage(
+        "Jira Preview is only available for .jira and .wiki files."
+      );
+      return;
+    }
+
+    this.currentDocument = editor.document;
+    void this.ensureWordWrap(editor);
 
     if (!this.panel) {
       this.panel = vscode.window.createWebviewPanel(
         "jiraMarkupPreview",
-        this.getTitle(document),
+        this.getTitle(editor.document),
         vscode.ViewColumn.Beside,
         {
           enableFindWidget: true,
@@ -28,8 +37,8 @@ export class JiraPreviewManager implements vscode.Disposable {
       }, null, this.context.subscriptions);
     }
 
-    this.panel.title = this.getTitle(document);
-    this.renderNow(document);
+    this.panel.title = this.getTitle(editor.document);
+    this.renderNow(editor.document);
   }
 
   public handleDocumentChange(event: vscode.TextDocumentChangeEvent) {
@@ -49,8 +58,13 @@ export class JiraPreviewManager implements vscode.Disposable {
       return;
     }
 
+    if (!isPreviewableDocument(editor.document)) {
+      return;
+    }
+
     this.currentDocument = editor.document;
     this.panel.title = this.getTitle(editor.document);
+    void this.ensureWordWrap(editor);
     this.scheduleRender(editor.document);
   }
 
@@ -82,6 +96,7 @@ export class JiraPreviewManager implements vscode.Disposable {
       this.renderTimer = undefined;
     }
 
+    void this.restoreWordWrap();
     this.panel?.dispose();
   }
 
@@ -114,8 +129,53 @@ export class JiraPreviewManager implements vscode.Disposable {
       this.renderTimer = undefined;
     }
 
+    void this.restoreWordWrap();
     this.panel = undefined;
     this.currentDocument = undefined;
+  }
+
+  private async ensureWordWrap(editor = vscode.window.activeTextEditor) {
+    if (!editor || !isPreviewableDocument(editor.document)) {
+      return;
+    }
+
+    const documentKey = editor.document.uri.toString();
+    if (this.wordWrapAdjustedDocuments.has(documentKey)) {
+      return;
+    }
+
+    const wordWrap = vscode.workspace
+      .getConfiguration("editor", editor.document.uri)
+      .get<string>("wordWrap");
+
+    if (wordWrap === "off") {
+      await vscode.commands.executeCommand("editor.action.toggleWordWrap");
+      this.wordWrapAdjustedDocuments.add(documentKey);
+    }
+  }
+
+  private async restoreWordWrap() {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+      this.wordWrapAdjustedDocuments.clear();
+      return;
+    }
+
+    const documentKey = editor.document.uri.toString();
+    if (!this.wordWrapAdjustedDocuments.has(documentKey)) {
+      this.wordWrapAdjustedDocuments.clear();
+      return;
+    }
+
+    const wordWrap = vscode.workspace
+      .getConfiguration("editor", editor.document.uri)
+      .get<string>("wordWrap");
+
+    if (wordWrap === "off") {
+      await vscode.commands.executeCommand("editor.action.toggleWordWrap");
+    }
+
+    this.wordWrapAdjustedDocuments.clear();
   }
 
   private getHtml(
@@ -164,8 +224,37 @@ export class JiraPreviewManager implements vscode.Disposable {
       margin-top: 1.4em;
     }
 
+    hr {
+      border: 0;
+      border-top: 1px solid var(--vscode-panel-border);
+      margin: 1.4em 0;
+    }
+
     p, ul, ol, blockquote, table, pre {
       margin: 0.8em 0;
+    }
+
+    ul, ol {
+      padding-left: 1.5em;
+    }
+
+    ol {
+      list-style: none;
+    }
+
+    li + li {
+      margin-top: 0.25em;
+    }
+
+    li > ul, li > ol {
+      margin-top: 0.4em;
+    }
+
+    .list-marker {
+      display: inline-block;
+      margin-right: 0.35em;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
     }
 
     code, pre {
@@ -180,10 +269,20 @@ export class JiraPreviewManager implements vscode.Disposable {
     }
 
     pre {
-      background: var(--vscode-textCodeBlock-background);
+      background: var(--vscode-editorWidget-background);
+      border: 1px solid var(--vscode-panel-border);
       padding: 12px;
       border-radius: 8px;
       overflow-x: auto;
+    }
+
+    pre code {
+      display: block;
+      background: transparent;
+      padding: 0;
+      border-radius: 0;
+      color: inherit;
+      white-space: pre;
     }
 
     blockquote {
@@ -254,6 +353,14 @@ export class JiraPreviewManager implements vscode.Disposable {
 </body>
 </html>`;
   }
+}
+
+function isPreviewableDocument(document: vscode.TextDocument): boolean {
+  return (
+    document.languageId === "jira-markup" ||
+    document.fileName.endsWith(".jira") ||
+    document.fileName.endsWith(".wiki")
+  );
 }
 
 function escapeHtml(input: string): string {
