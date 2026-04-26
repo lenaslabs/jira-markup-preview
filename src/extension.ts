@@ -14,7 +14,7 @@ export function activate(context: vscode.ExtensionContext) {
         return;
       }
 
-      preview.showPreview(editor.document);
+      preview.showPreview(editor);
     })
   );
 
